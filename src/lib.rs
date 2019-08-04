@@ -95,7 +95,7 @@ pub trait Future {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct FutureResult<T, E> {
     inner: Result<T, E>,
 }
@@ -115,10 +115,11 @@ impl<T, E> Future for FutureResult<T, E> {
     type Error = E;
 
     fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
-        Ok(self.inner.ok_or(()))
+        Ok(self.inner)
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct Map<A, F> {
     future: A,
     f: F,
@@ -162,6 +163,196 @@ where
             Err(f) => Err(MapErr {
                 future: f,
                 f: self.f,
+            }),
+        }
+    }
+}
+
+pub struct AndThen<A, B, F>
+where
+    B: IntoFuture,
+{
+    future: _AndThen<A, B::Future, F>,
+}
+
+enum _AndThen<A, B, F> {
+    First(A, F),
+    Second(B),
+}
+
+impl<A, B, F> Future for AndThen<A, B, F>
+where
+    A: Future,
+    B: IntoFuture<Error = A::Error>,
+    F: FnOnce(A::Item) -> B,
+{
+    type Item = B::Item;
+    type Error = B::Error;
+
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        let second = match self.future {
+            _AndThen::First(a, f) => match a.poll() {
+                Ok(Ok(next)) => f(next).into_future(),
+                Ok(Err(e)) => return Ok(Err(e)),
+                Err(a) => {
+                    return Err(AndThen {
+                        future: _AndThen::First(a, f),
+                    })
+                }
+            },
+            _AndThen::Second(b) => b,
+        };
+        second.poll().map_err(|b| AndThen {
+            future: _AndThen::Second(b),
+        })
+    }
+}
+
+pub struct OrElse<A, B, F>
+where
+    B: IntoFuture,
+{
+    future: _OrElse<A, B::Future, F>,
+}
+
+enum _OrElse<A, B, F> {
+    First(A, F),
+    Second(B),
+}
+
+impl<A, B, F> Future for OrElse<A, B, F>
+where
+    A: Future,
+    B: IntoFuture<Item = A::Item>,
+    F: FnOnce(A::Error) -> B,
+{
+    type Item = B::Item;
+    type Error = B::Error;
+
+    // Returns the option if it contains a value, otherwise calls f and returns the result.
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        let second = match self.future {
+            _OrElse::First(a, f) => match a.poll() {
+                Ok(Ok(next)) => return Ok(Ok(next)),
+                Ok(Err(e)) => f(e).into_future(),
+                Err(a) => {
+                    return Err(OrElse {
+                        future: _OrElse::First(a, f),
+                    })
+                }
+            },
+            _OrElse::Second(b) => b,
+        };
+        second.poll().map_err(|b| OrElse {
+            future: _OrElse::Second(b),
+        })
+    }
+}
+
+impl<T> Future for Receiver<T> {
+    type Item = T;
+    type Error = RecvError;
+
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        match self.try_recv() {
+            Ok(msg) => Ok(Ok(msg)),
+            Err(TryRecvError::Empty) => Err(self),
+            Err(TryRecvError::Disconnected) => Ok(Err(RecvError)),
+        }
+    }
+}
+
+pub struct Empty<T, E> {
+    _marker: marker::PhantomData<(T, E)>,
+}
+
+impl<T, E> Empty<T, E> {
+    pub fn new() -> Empty<T, E> {
+        Empty {
+            _marker: marker::PhantomData,
+        }
+    }
+}
+
+impl<T, E> Future for Empty<T, E> {
+    type Item = T;
+    type Error = E;
+
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        Err(self)
+    }
+}
+
+impl<T, E> Clone for Empty<T, E> {
+    fn clone(&self) -> Empty<T, E> {
+        Empty::new()
+    }
+}
+
+impl<T, E> Copy for Empty<T, E> {}
+
+pub struct Select<A, B> {
+    a: A,
+    b: B,
+}
+
+impl<A, B> Future for Select<A, B>
+where
+    A: Future,
+    B: Future<Item = A::Item, Error = A::Error>,
+{
+    type Item = A::Item;
+    type Error = A::Error;
+
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        let Select { a, b } = self;
+        a.poll().or_else(|a| b.poll().map_err(|b| Select { a, b }))
+    }
+}
+
+pub struct Join<A, B>
+where
+    A: Future,
+    B: Future<Error = A::Error>,
+{
+    state: _Join<A, B>,
+}
+
+enum _Join<A, B>
+where
+    A: Future,
+    B: Future<Error = A::Error>,
+{
+    Both(A, B),
+    First(A, Result<B::Item, A::Error>),
+    Second(Result<A::Item, A::Error>, B),
+}
+
+impl<A, B> Future for Join<A, B>
+where
+    A: Future,
+    B: Future<Error = A::Error>,
+{
+    type Item = (A::Item, B::Item);
+    type Error = A::Error;
+
+    fn poll(self) -> Result<Result<Self::Item, Self::Error>, Self> {
+        let (a, b) = match self.state {
+            _Join::Both(a, b) => (a.poll(), b.poll()),
+            _Join::First(a, b) => (a.poll(), Ok(b)),
+            _Join::Second(a, b) => (Ok(a), b.poll()),
+        };
+        match (a, b) {
+            (Ok(Err(e)), _) | (_, Ok(Err(e))) => Ok(Err(e)),
+            (Ok(Ok(a)), Ok(Ok(b))) => Ok(Ok((a, b))),
+            (Err(a), Ok(b)) => Err(Join {
+                state: _Join::First(a, b),
+            }),
+            (Ok(a), Err(b)) => Err(Join {
+                state: _Join::Second(a, b),
+            }),
+            (Err(a), Err(b)) => Err(Join {
+                state: _Join::Both(a, b),
             }),
         }
     }

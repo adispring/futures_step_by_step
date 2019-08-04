@@ -1,5 +1,5 @@
 [package]
-name = "futures_step_by_step"
+name = "futures"
 version = "0.1.0"
 authors = [""]
 edition = "2018"
