@@ -17,4 +17,6 @@ fn result_smoke() {
     is_future_v::<i32, u32, _>(f.map(|a| a + 1));
     is_future_v::<i32, u32, _>(f.and_then(|a| Ok(a)));
     is_future_v(f.or_else(|a| Err(a)));
+    is_future_v(f.select(Err(3)));
+    is_future_v::<(i32, i32), u32, _>(f.join(Err(3)));
 }
