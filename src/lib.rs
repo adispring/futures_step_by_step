@@ -262,6 +262,7 @@ impl<T> Future for Receiver<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct Empty<T, E> {
     _marker: marker::PhantomData<(T, E)>,
 }
