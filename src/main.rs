@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 extern crate futures;
 
 use futures::*;
@@ -11,4 +13,6 @@ fn main() {
     let empty_poll = empty.poll();
     println!("{:#?}", empty);
     println!("{:#?}", empty_poll);
+    let atomic_forty_two = AtomicUsize::new(42);
+    println!("{:#?}", atomic_forty_two);
 }
